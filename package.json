@@ -1,0 +1,33 @@
+{
+  "name": "pebblehenge",
+  "author": "Pebblehenge",
+  "version": "0.1.0",
+  "keywords": ["pebble-app"],
+  "private": true,
+  "dependencies": {},
+  "pebble": {
+    "displayName": "Pebblehenge",
+    "uuid": "0d8b3f6a-5e2c-4f4e-9c1d-2f7a1c4a9b00",
+    "sdkVersion": "3",
+    "enableMultiJS": true,
+    "targetPlatforms": ["diorite", "emery"],
+    "watchapp": {
+      "watchface": false
+    },
+    "messageKeys": [
+      "LatitudeE7",
+      "LongitudeE7",
+      "LocationAccuracyM",
+      "LocationTimestamp",
+      "MagDeclinationE4",
+      "TzOffsetMin",
+      "Units",
+      "Theme",
+      "RequestLocation"
+    ],
+    "capabilities": ["location", "configurable"],
+    "resources": {
+      "media": []
+    }
+  }
+}

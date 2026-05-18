@@ -1,0 +1,9 @@
+build/
+*.pbw
+node_modules/
+.DS_Store
+.waf-*
+.lock-waf*
+__pycache__/
+*.pyc
+sun_test
