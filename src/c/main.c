@@ -65,6 +65,14 @@ static void recompute_events_if_needed(int64_t now_utc, const geo_fix_t *fix) {
     format_event_line(s_events.sunset,     fix->tz_offset_min, "Set ", s_set_buf,  sizeof s_set_buf);
 }
 
+static void format_fix_age(int64_t fix_unix, int64_t now_utc, char *out, size_t n) {
+    int64_t age = now_utc - fix_unix;
+    if (age < 60)         snprintf(out, n, "%ds",  (int)age);
+    else if (age < 3600)  snprintf(out, n, "%dm",  (int)(age / 60));
+    else if (age < 86400) snprintf(out, n, "%dh",  (int)(age / 3600));
+    else                  snprintf(out, n, "%dd",  (int)(age / 86400));
+}
+
 static void refresh_view(void) {
     time_t now;
     time(&now);
@@ -77,9 +85,15 @@ static void refresh_view(void) {
     strftime(s_clock_buf, sizeof s_clock_buf,
              clock_is_24h_style() ? "%H:%M" : "%I:%M", lt);
 
-    snprintf(s_loc_buf, sizeof s_loc_buf,
-             fix.valid ? "fix %.2f,%.2f" : "seed %.2f,%.2f",
-             fix.lat_deg, fix.lon_deg);
+    if (fix.valid && fix.fix_unix > 0) {
+        char age[8];
+        format_fix_age(fix.fix_unix, now_utc, age, sizeof age);
+        snprintf(s_loc_buf, sizeof s_loc_buf, "%.2f,%.2f %s",
+                 fix.lat_deg, fix.lon_deg, age);
+    } else {
+        snprintf(s_loc_buf, sizeof s_loc_buf, "seed %.2f,%.2f",
+                 fix.lat_deg, fix.lon_deg);
+    }
 
     /* Sun position. */
     sun_position_t p = sun_position(now_utc, fix.lat_deg, fix.lon_deg);
@@ -89,6 +103,47 @@ static void refresh_view(void) {
     recompute_events_if_needed(now_utc, &fix);
 
     layer_mark_dirty(window_get_root_layer(s_window));
+}
+
+/* --- AppMessage --------------------------------------------------------- */
+
+static void invalidate_events_cache(void) {
+    s_events_day = -1;
+}
+
+static void inbox_received(DictionaryIterator *iter, void *context) {
+    (void)context;
+    Tuple *t_lat   = dict_find(iter, MESSAGE_KEY_LatitudeE7);
+    Tuple *t_lon   = dict_find(iter, MESSAGE_KEY_LongitudeE7);
+    Tuple *t_tz    = dict_find(iter, MESSAGE_KEY_TzOffsetMin);
+    Tuple *t_ts    = dict_find(iter, MESSAGE_KEY_LocationTimestamp);
+    Tuple *t_decl  = dict_find(iter, MESSAGE_KEY_MagDeclinationE4);
+
+    bool got_fix = (t_lat && t_lon && t_tz);
+    if (got_fix) {
+        float lat = (float)t_lat->value->int32 / 1.0e7f;
+        float lon = (float)t_lon->value->int32 / 1.0e7f;
+        int16_t tz = (int16_t)t_tz->value->int32;
+        int64_t fix_ts = t_ts ? (int64_t)t_ts->value->int32 : (int64_t)time(NULL);
+        geo_set(lat, lon, tz, fix_ts);
+        invalidate_events_cache();
+    }
+    if (t_decl) {
+        geo_set_mag_declination((float)t_decl->value->int32 / 1.0e4f);
+    }
+    if (got_fix || t_decl) refresh_view();
+}
+
+static void inbox_dropped(AppMessageResult reason, void *context) {
+    (void)context;
+    APP_LOG(APP_LOG_LEVEL_WARNING, "AppMessage inbox dropped: %d", reason);
+}
+
+static void request_fresh_location(void) {
+    DictionaryIterator *iter;
+    if (app_message_outbox_begin(&iter) != APP_MSG_OK) return;
+    dict_write_uint8(iter, MESSAGE_KEY_RequestLocation, 1);
+    app_message_outbox_send();
 }
 
 /* --- Lifecycle --------------------------------------------------------- */
@@ -163,12 +218,18 @@ static void init(void) {
     });
     window_stack_push(s_window, true);
 
+    app_message_register_inbox_received(inbox_received);
+    app_message_register_inbox_dropped(inbox_dropped);
+    app_message_open(256, 32);
+
     refresh_view();
+    request_fresh_location();
     tick_timer_service_subscribe(MINUTE_UNIT, on_minute_tick);
 }
 
 static void deinit(void) {
     tick_timer_service_unsubscribe();
+    app_message_deregister_callbacks();
     window_destroy(s_window);
 }
 
