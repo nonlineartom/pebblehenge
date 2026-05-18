@@ -11,11 +11,16 @@
 
 #include <stdbool.h>
 
-/* Vertical layout (canvas-local). */
+/* Vertical layout (canvas-local). Default horizon position used when
+ * the IMU hasn't supplied a pitch yet (~74 deg of tilt — a typical
+ * watch-on-wrist viewing angle). */
 #define HORIZON_FRAC_NUM   72
 #define HORIZON_FRAC_DEN  100
 #define ALT_TOP_DEG        90.0f
 #define ALT_BOTTOM_DEG    -20.0f
+
+/* Pitch in degrees; -1 = no IMU yet, use the default fraction. */
+static float s_pitch_deg = -1.0f;
 
 /* Horizontal field of view: a narrower FOV "zooms in" on the visible
  * sky in front of the user. 240 deg shows roughly horizon to horizon
@@ -73,6 +78,16 @@ void ui_arc_set_heading(float heading_deg) {
     if (s_layer) layer_mark_dirty(s_layer);
 }
 
+void ui_arc_set_pitch(float pitch_deg) {
+    /* Filter tiny changes so we don't redraw on every accel sample
+     * when the user is holding the watch steady. */
+    float delta = pitch_deg - s_pitch_deg;
+    if (delta < 0.0f) delta = -delta;
+    if (s_pitch_deg >= 0.0f && delta < 1.5f) return;
+    s_pitch_deg = pitch_deg;
+    if (s_layer) layer_mark_dirty(s_layer);
+}
+
 /* ----------------------------------------------------------------------- */
 
 /* Cached "view centre" azimuth used by az_offset_deg. When the compass
@@ -103,6 +118,23 @@ static float az_offset_deg(float sun_az) {
     return d;
 }
 
+/* Return the y position of the horizon line, taking the IMU pitch into
+ * account. Pitch 0 (face up) -> horizon near the bottom of the canvas
+ * (looking straight up). Pitch ~90 (vertical) -> horizon at canvas
+ * centre. Pitch 180 (face down) -> horizon near the top. */
+static int horizon_y_for(GRect b) {
+    if (s_pitch_deg < 0.0f) {
+        return b.origin.y + b.size.h * HORIZON_FRAC_NUM / HORIZON_FRAC_DEN;
+    }
+    /* Clamp pitch to [0, 180] and linearly map to [bottom, top]. We pad
+     * the extremes by 5% so the horizon line stays on-screen. */
+    float p = s_pitch_deg;
+    if (p <    0.0f) p =   0.0f;
+    if (p >  180.0f) p = 180.0f;
+    float frac = 0.95f - (p / 180.0f) * 0.90f;  /* [0.05, 0.95] */
+    return b.origin.y + (int)(frac * (float)b.size.h);
+}
+
 static int x_for_offset(float offset_deg, GRect b) {
     float t = (offset_deg + FOV_DEG / 2.0f) / FOV_DEG;
     if (t < 0.0f) t = 0.0f;
@@ -111,7 +143,7 @@ static int x_for_offset(float offset_deg, GRect b) {
 }
 
 static int y_for_altitude(float alt_deg, GRect b) {
-    int horizon_y = b.origin.y + b.size.h * HORIZON_FRAC_NUM / HORIZON_FRAC_DEN;
+    int horizon_y = horizon_y_for(b);
     if (alt_deg >= 0.0f) {
         int top_y = b.origin.y + 2;
         float t = alt_deg / ALT_TOP_DEG;
@@ -156,17 +188,16 @@ static void draw_background(GContext *ctx, GRect b) {
     graphics_context_set_fill_color(ctx, GColorPictonBlue);
     graphics_fill_rect(ctx, b, 0, GCornerNone);
     /* Below-horizon "ground" in dark. */
-    GRect below = GRect(b.origin.x,
-                        b.origin.y + b.size.h * HORIZON_FRAC_NUM / HORIZON_FRAC_DEN,
-                        b.size.w,
-                        b.size.h - b.size.h * HORIZON_FRAC_NUM / HORIZON_FRAC_DEN);
+    int hy = horizon_y_for(b);
+    GRect below = GRect(b.origin.x, hy, b.size.w,
+                        b.origin.y + b.size.h - hy);
     graphics_context_set_fill_color(ctx, GColorOxfordBlue);
     graphics_fill_rect(ctx, below, 0, GCornerNone);
 #else
     graphics_context_set_fill_color(ctx, GColorWhite);
     graphics_fill_rect(ctx, b, 0, GCornerNone);
     /* Hatch the below-horizon area lightly so it's distinguishable. */
-    int horizon_y = b.origin.y + b.size.h * HORIZON_FRAC_NUM / HORIZON_FRAC_DEN;
+    int horizon_y = horizon_y_for(b);
     graphics_context_set_stroke_color(ctx, GColorBlack);
     for (int y = horizon_y + 2; y < b.origin.y + b.size.h; y += 3) {
         for (int x = b.origin.x + (y & 1); x < b.origin.x + b.size.w; x += 2) {
@@ -177,7 +208,7 @@ static void draw_background(GContext *ctx, GRect b) {
 }
 
 static void draw_horizon(GContext *ctx, GRect b) {
-    int hy = b.origin.y + b.size.h * HORIZON_FRAC_NUM / HORIZON_FRAC_DEN;
+    int hy = horizon_y_for(b);
     graphics_context_set_stroke_color(ctx, GColorBlack);
     graphics_context_set_stroke_width(ctx, 1);
     graphics_draw_line(ctx, GPoint(b.origin.x, hy),
@@ -186,7 +217,7 @@ static void draw_horizon(GContext *ctx, GRect b) {
 
 static void draw_cardinal_ticks(GContext *ctx, GRect b) {
     /* N/E/S/W tick marks on the horizon line at their azimuth-offsets. */
-    int hy = b.origin.y + b.size.h * HORIZON_FRAC_NUM / HORIZON_FRAC_DEN;
+    int hy = horizon_y_for(b);
     const struct { const char *label; float az; } pts[] = {
         {"N",   0.0f},
         {"E",  90.0f},

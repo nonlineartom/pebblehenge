@@ -32,6 +32,13 @@ void ui_arc_set_now(int64_t now_utc);
  * compass is uncalibrated). */
 void ui_arc_set_heading(float heading_deg);
 
+/* Set the watch's pitch (deg). 0 = held face-up flat -> horizon near
+ * the bottom of the canvas (we're looking straight up at the sky);
+ * 90 = held vertical, screen facing the user -> horizon near the
+ * middle of the canvas; 180 = face down -> horizon near the top
+ * (looking at the ground). */
+void ui_arc_set_pitch(float pitch_deg);
+
 /* Lifecycle for the canvas. The Layer's update_proc reads from the
  * cached samples plus current-now and renders bands + arc curve. */
 Layer *ui_arc_layer_create(GRect frame);

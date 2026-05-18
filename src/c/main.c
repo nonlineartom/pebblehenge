@@ -6,6 +6,7 @@
 #include "sun.h"
 #include "geo.h"
 #include "compass.h"
+#include "imu.h"
 #include "ui_arc.h"
 
 /* --- App-wide state ---------------------------------------------------- */
@@ -260,7 +261,6 @@ static int64_t now_unix_utc(void) {
 
 static void refresh_view(void) {
     int64_t real_now_utc = now_unix_utc();
-    time_t now = (time_t)real_now_utc;
 
     /* Auto-release the scrub after a few seconds of no input. */
     if (s_scrub_offset_sec != 0
@@ -325,6 +325,10 @@ static void on_minute_tick(struct tm *tick_time, TimeUnits units_changed) {
     (void)tick_time;
     (void)units_changed;
     refresh_view();
+}
+
+static void on_imu_sample(pbh_attitude_t att) {
+    if (att.ready) ui_arc_set_pitch(att.pitch_deg);
 }
 
 static void on_compass_sample(pbh_compass_t sample) {
@@ -541,6 +545,7 @@ static void init(void) {
     app_message_open(256, 32);
 
     pbh_compass_init(on_compass_sample, geo_mag_declination_deg());
+    pbh_imu_init(on_imu_sample);
 
     refresh_view();
     request_fresh_location();
@@ -550,6 +555,7 @@ static void init(void) {
 static void deinit(void) {
     tick_timer_service_unsubscribe();
     pbh_compass_deinit();
+    pbh_imu_deinit();
     app_message_deregister_callbacks();
     window_destroy(s_window);
 }

@@ -38,6 +38,19 @@ Captured live from the QEMU emulator (`pebble screenshot`):
 ![2 Duo compass overlay](screenshots/diorite-compass.png)
 ![2 Duo timeline scrub](screenshots/diorite-scrub.png)
 
+### Phase 7 — accelerometer tilt compensation
+
+Same arc, three gravity vectors sent via `pebble emu-accel`. The horizon
+line slides up the canvas as the watch tilts upward (looking more at the
+sky), so the user can naturally point the watch toward the horizon to
+read sunrise / sunset markers or up at the sky to read midday sun
+position. The arc geometry itself is unchanged — only the projection's
+horizon-Y is reparameterised by pitch.
+
+![Tilt: face up](screenshots/diorite-tilt-flat.png)
+![Tilt: 45°](screenshots/diorite-tilt-mid.png)
+![Tilt: vertical](screenshots/diorite-tilt-vertical.png)
+
 ## How it works
 
 ### Sun position
@@ -151,8 +164,18 @@ pebblehenge/
    input), app glance for next event.
 7. **(rebuild)** — replaced the time-axis chart with the proper sky-dome
    projection (current state).
-8. **Phase 7** — tilt compensation via accelerometer / gyro fusion
-   (in progress, see `imu.c`).
+8. **Phase 7** — tilt compensation. `src/c/imu.{c,h}` subscribes to
+   `AccelerometerService` at 10 Hz, smooths gravity with an EMA
+   (α = 0.15, ~0.3 s settle), derives pitch as
+   `atan2(-y, sqrt(x² + z²))`, and forwards a `pbh_attitude_t` to
+   `ui_arc.c`. The renderer slides the horizon line from the bottom of
+   the canvas (face up, looking at the sky) to the top (face down,
+   looking at the ground) as pitch sweeps 0..180°. A 1.5° dead zone in
+   `ui_arc_set_pitch` keeps the canvas from redrawing on every accel
+   sample when the watch is held steady. Atan/sqrt are duplicated
+   inline (sun.c's private helpers aren't exported) so the IMU module
+   stays libm-free for the same Pebble app-loader relocation reason
+   sun.c does.
 
 ## Build
 
