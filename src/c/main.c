@@ -3,6 +3,7 @@
 #include "sun.h"
 #include "geo.h"
 #include "compass.h"
+#include "ui_arc.h"
 
 /* --- App-wide state ---------------------------------------------------- */
 
@@ -31,9 +32,8 @@ static TextLayer  *s_clock_layer;
 static TextLayer  *s_loc_layer;
 static TextLayer  *s_az_layer;
 static TextLayer  *s_alt_layer;
-static TextLayer  *s_rise_layer;
-static TextLayer  *s_noon_layer;
-static TextLayer  *s_set_layer;
+static TextLayer  *s_next_event_layer;
+static Layer      *s_arc_canvas;
 
 static TextLayer  *s_hdg_layer;
 static TextLayer  *s_bearing_layer;
@@ -45,17 +45,13 @@ static char s_clock_buf[8];
 static char s_loc_buf[24];
 static char s_az_buf[20];
 static char s_alt_buf[16];
-static char s_rise_buf[20];
-static char s_noon_buf[20];
-static char s_set_buf[20];
+static char s_next_event_buf[24];
 
 static char s_hdg_buf[16];
 static char s_bearing_buf[24];
 static char s_status_buf[28];
 
-/* --- Cached day events -------------------------------------------------- */
-
-static sun_day_events_t s_events;
+/* Day index for which the arc + events are currently cached. */
 static int s_events_day = -1;
 
 /* --- Triangle pointing "up" (toward sun before rotation). -------------- */
@@ -91,13 +87,6 @@ static void format_local_hm(int64_t unix_utc, int tz_offset_min, char *out, size
     snprintf(out, n, "%02d:%02d", hh, mm);
 }
 
-static void format_event_line(int64_t unix_utc, int tz_offset_min,
-                               const char *label, char *out, size_t n) {
-    char hm[8];
-    format_local_hm(unix_utc, tz_offset_min, hm, sizeof hm);
-    snprintf(out, n, "%s  %s", label, hm);
-}
-
 static void format_fix_age(int64_t fix_unix, int64_t now_utc, char *out, size_t n) {
     int64_t age = now_utc - fix_unix;
     if (age < 60)         snprintf(out, n, "%ds", (int)age);
@@ -106,14 +95,42 @@ static void format_fix_age(int64_t fix_unix, int64_t now_utc, char *out, size_t 
     else                  snprintf(out, n, "%dd", (int)(age / 86400));
 }
 
-static void recompute_events_if_needed(int64_t now_utc, const geo_fix_t *fix) {
+static void recompute_arc_if_needed(int64_t now_utc, const geo_fix_t *fix) {
     int local_day = (int)(((now_utc + (int64_t)fix->tz_offset_min * 60) / 86400) & 0xFFFF);
     if (local_day == s_events_day) return;
-    s_events = sun_day_events(now_utc, fix->lat_deg, fix->lon_deg, fix->tz_offset_min);
+    ui_arc_set_now(now_utc);
+    ui_arc_recompute(fix);
     s_events_day = local_day;
-    format_event_line(s_events.sunrise,    fix->tz_offset_min, "Rise", s_rise_buf, sizeof s_rise_buf);
-    format_event_line(s_events.solar_noon, fix->tz_offset_min, "Noon", s_noon_buf, sizeof s_noon_buf);
-    format_event_line(s_events.sunset,     fix->tz_offset_min, "Set ", s_set_buf,  sizeof s_set_buf);
+}
+
+static void describe_next_event(int64_t now_utc, char *out, size_t n) {
+    const sun_day_events_t *e = ui_arc_events();
+    geo_fix_t fix = geo_current();
+
+    struct { const char *label; int64_t when; } cands[] = {
+        { "Rise",   e->sunrise },
+        { "Noon",   e->solar_noon },
+        { "Golden", e->golden_hour_evening_start },
+        { "Set",    e->sunset },
+        { "Civil",  e->civil_dusk },
+    };
+    int64_t best = (int64_t)1 << 62;
+    const char *label = "";
+    int64_t when = 0;
+    for (size_t i = 0; i < sizeof cands / sizeof cands[0]; i++) {
+        int64_t w = cands[i].when;
+        if (w == SUN_NEVER_RISES || w == SUN_NEVER_SETS) continue;
+        if (w > now_utc && w < best) { best = w; label = cands[i].label; when = w; }
+    }
+    if (best == ((int64_t)1 << 62)) {
+        snprintf(out, n, "-");
+        return;
+    }
+    char hm[8];
+    int64_t local = when + (int64_t)fix.tz_offset_min * 60;
+    int sec = (int)(((local % 86400) + 86400) % 86400);
+    snprintf(hm, sizeof hm, "%02d:%02d", sec / 3600, (sec % 3600) / 60);
+    snprintf(out, n, "%s %s", label, hm);
 }
 
 static float bearing_delta(float sun_az_deg, float heading_deg) {
@@ -218,7 +235,9 @@ static void refresh_view(void) {
     snprintf(s_az_buf,  sizeof s_az_buf,  "AZ %5.1f %s", p.azimuth, cardinal_8(p.azimuth));
     snprintf(s_alt_buf, sizeof s_alt_buf, "ALT %+5.1f", p.altitude);
 
-    recompute_events_if_needed(now_utc, &fix);
+    recompute_arc_if_needed(now_utc, &fix);
+    ui_arc_set_now(now_utc);
+    describe_next_event(now_utc, s_next_event_buf, sizeof s_next_event_buf);
 
     redraw_compass_view();
     layer_mark_dirty(window_get_root_layer(s_window));
@@ -305,27 +324,28 @@ static TextLayer *mk_line(Layer *parent, GRect frame, const char *font_key,
 }
 
 static void build_data_view(Layer *parent, GRect b) {
-    int y = 0;
-    s_clock_layer = mk_line(parent, GRect(0, y, b.size.w, 24),
-                            FONT_KEY_GOTHIC_24_BOLD, GTextAlignmentCenter, s_clock_buf);
-    y += 24;
-    s_loc_layer   = mk_line(parent, GRect(0, y, b.size.w, 16),
-                            FONT_KEY_GOTHIC_14, GTextAlignmentCenter, s_loc_buf);
-    y += 18;
-    s_az_layer    = mk_line(parent, GRect(0, y, b.size.w, 22),
-                            FONT_KEY_GOTHIC_18_BOLD, GTextAlignmentLeft, s_az_buf);
-    y += 22;
-    s_alt_layer   = mk_line(parent, GRect(0, y, b.size.w, 22),
-                            FONT_KEY_GOTHIC_18_BOLD, GTextAlignmentLeft, s_alt_buf);
-    y += 26;
-    s_rise_layer  = mk_line(parent, GRect(0, y, b.size.w, 18),
-                            FONT_KEY_GOTHIC_14, GTextAlignmentLeft, s_rise_buf);
-    y += 18;
-    s_noon_layer  = mk_line(parent, GRect(0, y, b.size.w, 18),
-                            FONT_KEY_GOTHIC_14, GTextAlignmentLeft, s_noon_buf);
-    y += 18;
-    s_set_layer   = mk_line(parent, GRect(0, y, b.size.w, 18),
-                            FONT_KEY_GOTHIC_14, GTextAlignmentLeft, s_set_buf);
+    /* Header: clock on the left, location pill on the right. */
+    s_clock_layer = mk_line(parent, GRect(0, 0, b.size.w * 60 / 100, 22),
+                            FONT_KEY_GOTHIC_18_BOLD, GTextAlignmentLeft, s_clock_buf);
+    s_loc_layer   = mk_line(parent, GRect(b.size.w * 60 / 100 - 4, 4,
+                                          b.size.w * 40 / 100, 16),
+                            FONT_KEY_GOTHIC_14, GTextAlignmentRight, s_loc_buf);
+
+    /* Arc canvas occupies the middle of the screen. */
+    int arc_y = 24;
+    int arc_h = b.size.h - arc_y - 44;
+    s_arc_canvas = ui_arc_layer_create(GRect(0, arc_y, b.size.w, arc_h));
+    layer_add_child(parent, s_arc_canvas);
+
+    /* Bottom strip: AZ on the left, ALT on the right, next-event below. */
+    int below = arc_y + arc_h + 2;
+    s_az_layer  = mk_line(parent, GRect(2, below, b.size.w / 2 - 2, 20),
+                          FONT_KEY_GOTHIC_18_BOLD, GTextAlignmentLeft, s_az_buf);
+    s_alt_layer = mk_line(parent, GRect(b.size.w / 2, below, b.size.w / 2 - 2, 20),
+                          FONT_KEY_GOTHIC_18_BOLD, GTextAlignmentRight, s_alt_buf);
+    s_next_event_layer = mk_line(parent, GRect(0, below + 20, b.size.w, 18),
+                                 FONT_KEY_GOTHIC_14, GTextAlignmentCenter,
+                                 s_next_event_buf);
 }
 
 static void build_compass_view(Layer *parent, GRect b) {
@@ -375,9 +395,8 @@ static void window_unload(Window *window) {
     text_layer_destroy(s_loc_layer);
     text_layer_destroy(s_az_layer);
     text_layer_destroy(s_alt_layer);
-    text_layer_destroy(s_rise_layer);
-    text_layer_destroy(s_noon_layer);
-    text_layer_destroy(s_set_layer);
+    text_layer_destroy(s_next_event_layer);
+    ui_arc_layer_destroy(s_arc_canvas);
     text_layer_destroy(s_hdg_layer);
     text_layer_destroy(s_bearing_layer);
     text_layer_destroy(s_status_layer);
