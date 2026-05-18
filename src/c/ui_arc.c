@@ -316,6 +316,94 @@ static void draw_endpoint(GContext *ctx, GRect b, int local_minutes,
     }
 }
 
+/* Interpolate (az, alt) at any minute-of-the-local-day. Caller has
+ * already validated 0 <= minutes <= 1440. */
+static void sun_at_minutes_simple(int minutes, float *az, float *alt) {
+    int idx = minutes / 30;
+    if (idx >= ARC_SAMPLE_COUNT - 1) idx = ARC_SAMPLE_COUNT - 2;
+    float f = (float)(minutes - idx * 30) / 30.0f;
+    *alt = s_samples[idx].altitude_deg
+         + (s_samples[idx + 1].altitude_deg - s_samples[idx].altitude_deg) * f;
+    float a = s_samples[idx].azimuth_deg;
+    float b = s_samples[idx + 1].azimuth_deg;
+    float d = b - a;
+    if (d >  180.0f) d -= 360.0f;
+    if (d < -180.0f) d += 360.0f;
+    float v = a + d * f;
+    while (v < 0.0f)    v += 360.0f;
+    while (v >= 360.0f) v -= 360.0f;
+    *az = v;
+}
+
+/* Draw a vertical tick at the arc sample for each whole local hour,
+ * with a longer tick + label at sunrise / solar noon / sunset (which
+ * we already know in local minutes). The label fonts are intentionally
+ * small so the arc still reads at a glance. */
+static void draw_hourly_ticks(GContext *ctx, GRect b) {
+    if (!s_samples_valid) return;
+
+    int16_t rise = event_to_local_minutes(s_events.sunrise);
+    int16_t noon = event_to_local_minutes(s_events.solar_noon);
+    int16_t set_ = event_to_local_minutes(s_events.sunset);
+
+    graphics_context_set_stroke_color(ctx, GColorBlack);
+#if defined(PBL_COLOR)
+    graphics_context_set_text_color(ctx, GColorBlack);
+#else
+    graphics_context_set_text_color(ctx, GColorBlack);
+#endif
+
+    /* Minor ticks: every hour, only when the sun is above the horizon
+     * (no point cluttering the night portion of the arc). */
+    for (int h = 0; h <= 24; h++) {
+        int minutes = h * 60;
+        float az, alt;
+        sun_at_minutes_simple(minutes, &az, &alt);
+        if (alt < -2.0f) continue;
+        float off = az_offset_deg(az);
+        if (off < -FOV_DEG / 2.0f || off > FOV_DEG / 2.0f) continue;
+        int x = x_for_offset(off, b);
+        int y = y_for_altitude(alt, b);
+        graphics_draw_pixel(ctx, GPoint(x, y - 2));
+        graphics_draw_pixel(ctx, GPoint(x, y + 2));
+    }
+
+    /* Major ticks + labels at rise / noon / set. */
+    struct { int16_t minute; const char *label; } majors[] = {
+        { rise, "rise" }, { noon, "noon" }, { set_, "set" }
+    };
+    GFont font = fonts_get_system_font(FONT_KEY_GOTHIC_14);
+
+    for (unsigned i = 0; i < sizeof majors / sizeof majors[0]; i++) {
+        int16_t m = majors[i].minute;
+        if (m < 0 || m > 1440) continue;  /* sentinel */
+        float az, alt;
+        sun_at_minutes_simple(m, &az, &alt);
+        float off = az_offset_deg(az);
+        if (off < -FOV_DEG / 2.0f || off > FOV_DEG / 2.0f) continue;
+        int x = x_for_offset(off, b);
+        int y = y_for_altitude(alt, b);
+
+        /* 5-px solid disc - distinct from the sun ball (filled + halo). */
+        graphics_context_set_fill_color(ctx, GColorWhite);
+        graphics_fill_circle(ctx, GPoint(x, y), 3);
+        graphics_context_set_fill_color(ctx, GColorBlack);
+        graphics_fill_circle(ctx, GPoint(x, y), 2);
+
+        /* Place the label so it doesn't collide with the curve: above
+         * the disc when above horizon, below when below. */
+        int lbl_y = (alt > 0.0f) ? (y - 16) : (y + 4);
+        int lbl_x = x - 16;
+        if (lbl_x < b.origin.x) lbl_x = b.origin.x;
+        if (lbl_x > b.origin.x + b.size.w - 32)
+            lbl_x = b.origin.x + b.size.w - 32;
+        graphics_draw_text(ctx, majors[i].label, font,
+                           GRect(lbl_x, lbl_y, 32, 14),
+                           GTextOverflowModeWordWrap,
+                           GTextAlignmentCenter, NULL);
+    }
+}
+
 static void draw_sun(GContext *ctx, GRect b) {
     if (!s_samples_valid) return;
     float az, alt;
@@ -363,8 +451,7 @@ static void arc_update_proc(Layer *layer, GContext *ctx) {
     draw_horizon(ctx, b);
     draw_cardinal_ticks(ctx, b);
     draw_arc(ctx, b);
-    draw_endpoint(ctx, b, event_to_local_minutes(s_events.sunrise), true);
-    draw_endpoint(ctx, b, event_to_local_minutes(s_events.sunset),  false);
+    draw_hourly_ticks(ctx, b);
     draw_sun(ctx, b);
     draw_heading_marker(ctx, b);
 }

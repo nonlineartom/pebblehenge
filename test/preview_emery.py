@@ -16,8 +16,8 @@ from PIL import Image, ImageDraw, ImageFont
 SCREEN_W, SCREEN_H = 200, 228
 
 # Match main.c's build_data_view layout (arc canvas placement).
-ARC_Y      = 30           # y origin of arc canvas within screen
-ARC_H      = SCREEN_H - ARC_Y - 60
+ARC_Y      = 28           # y origin of arc canvas within screen
+ARC_H      = SCREEN_H - ARC_Y - 28
 ARC_W      = SCREEN_W
 HORIZON_FRAC_NUM = 72     # = ui_arc.c
 HORIZON_FRAC_DEN = 100
@@ -194,19 +194,35 @@ def render(now_utc, lat, lon, tz_offset_min, heading_deg=None, out_path="/tmp/em
         below = samples[i - 1][1] < 0 and samples[i][1] < 0
         draw.line([pts[i - 1], pts[i]], fill=COLOR_BLACK, width=1 if below else 2)
 
-    # ---- Sunrise / sunset endpoint markers --------------------------------
+    # ---- Hourly tick marks + major rise/noon/set labels -------------------
     rise = event_for_target_alt(local_midnight + 43200, lat, lon, -0.833, True)
     set_ = event_for_target_alt(local_midnight + 43200, lat, lon, -0.833, False)
-    for ev_unix, up in [(rise, True), (set_, False)]:
-        if ev_unix is None: continue
-        az, alt = sun_position(ev_unix, lat, lon)
-        off = az_off(az)
-        if -FOV_DEG / 2 <= off <= FOV_DEG / 2:
-            x, y = x_for_offset(off), y_for_alt(alt)
-            r = 4
-            draw.ellipse((x - r, y - r, x + r, y + r), fill=COLOR_WHITE, outline=COLOR_BLACK)
-            if up: draw.line([(x, y - 5), (x, y - 9)], fill=COLOR_BLACK, width=2)
-            else:  draw.line([(x, y + 5), (x, y + 9)], fill=COLOR_BLACK, width=2)
+    # Minor hourly ticks (only above horizon).
+    for h in range(25):
+        t = local_midnight + h * 3600
+        az_h, alt_h = sun_position(t, lat, lon)
+        if alt_h < -2: continue
+        off = az_off(az_h)
+        if not (-FOV_DEG/2 <= off <= FOV_DEG/2): continue
+        x, y = x_for_offset(off), y_for_alt(alt_h)
+        draw.line([(x, y - 3), (x, y + 3)], fill=COLOR_BLACK, width=1)
+    # Major dots + labels.
+    # Solar-noon by max altitude.
+    best_t = None; best_alt = -90
+    for h_min in range(0, 1441, 5):
+        t = local_midnight + h_min * 60
+        _, a = sun_position(t, lat, lon)
+        if a > best_alt: best_alt = a; best_t = t
+    for t, lab in [(rise, "rise"), (best_t, "noon"), (set_, "set")]:
+        if t is None: continue
+        az_e, alt_e = sun_position(t, lat, lon)
+        off = az_off(az_e)
+        if not (-FOV_DEG/2 <= off <= FOV_DEG/2): continue
+        x, y = x_for_offset(off), y_for_alt(alt_e)
+        draw.ellipse((x - 4, y - 4, x + 4, y + 4), fill=COLOR_WHITE, outline=COLOR_BLACK)
+        draw.ellipse((x - 2, y - 2, x + 2, y + 2), fill=COLOR_BLACK)
+        ly = (y - 18) if alt_e > 0 else (y + 6)
+        draw.text((x - 16, ly), lab, fill=COLOR_BLACK, font=font_small)
 
     # ---- Sun ball (current position) --------------------------------------
     az_now, alt_now = sun_position(now_utc, lat, lon)
@@ -221,57 +237,23 @@ def render(now_utc, lat, lon, tz_offset_min, heading_deg=None, out_path="/tmp/em
         cx = SCREEN_W // 2
         draw.polygon([(cx, ARC_Y + 6), (cx - 4, ARC_Y), (cx + 4, ARC_Y)], fill=COLOR_BLACK)
 
-    # ---- Header strip: clock + location -----------------------------------
-    import time as _time
+    # ---- Header strip: clock + GPS recency indicator ----------------------
     local_secs = (now_utc + tz_offset_min * 60) % 86400
     hh = int(local_secs // 3600); mm = int((local_secs % 3600) // 60)
     clock = f"{hh:02d}:{mm:02d}"
-    draw.text((4, 4), clock, fill=COLOR_BLACK, font=font_big)
-    loc = f"seed {lat:.2f},{lon:.2f}"
-    draw.text((SCREEN_W - 110, 8), loc, fill=COLOR_BLACK, font=font_small)
+    draw.text((4, 2), clock, fill=COLOR_BLACK, font=font_big)
+    # In the preview we always show a seed status.
+    draw.text((SCREEN_W - 60, 8), "? seed", fill=COLOR_BLACK, font=font_small)
 
-    # ---- Bottom strip: AZ / ALT / next event ------------------------------
-    cardinals = ["N", "NE", "E", "SE", "S", "SW", "W", "NW"]
-    card = cardinals[int((az_now + 22.5) / 45) & 7]
-    az_w, az_f = int(az_now), int((az_now - int(az_now)) * 10)
-    alt_w = int(alt_now); alt_f = int((alt_now - int(alt_now)) * 10); alt_f = abs(alt_f)
+    # ---- Bottom strip: single centred "HH:MM - HH:MM" --------------------
     bot_y = ARC_Y + ARC_H + 2
-    draw.text((4, bot_y), f"AZ {az_w}.{az_f} {card}", fill=COLOR_BLACK, font=font_med)
-    draw.text((SCREEN_W - 90, bot_y), f"ALT {alt_w:+d}.{alt_f}", fill=COLOR_BLACK, font=font_med)
-
-    # next event: rise / noon / set / golden_eve / civil_dusk
-    candidates = []
-    rise_u = event_for_target_alt(local_midnight + 43200, lat, lon, -0.833, True)
-    set_u = event_for_target_alt(local_midnight + 43200, lat, lon, -0.833, False)
-    golden_eve = event_for_target_alt(local_midnight + 43200, lat, lon, 6.0, False)
-    civil_dusk = event_for_target_alt(local_midnight + 43200, lat, lon, -6.0, False)
-    # solar noon: from eq-of-time directly
-    T = ((2440587.5 + (local_midnight + 43200) / 86400.0) - 2451545.0) / 36525.0
-    M = 357.52911 + T * (35999.05029 - T * 0.0001537); Mr = math.radians(M)
-    e = 0.016708634 - T * (0.000042037 + T * 0.0000001267)
-    omega = 125.04 - 1934.136 * T
-    eps0 = 23 + (26 + (21.448 - T * (46.815 + T * (0.00059 - T * 0.001813))) / 60) / 60
-    eps = eps0 + 0.00256 * math.cos(math.radians(omega))
-    y_t = math.tan(math.radians(eps) / 2) ** 2
-    l0 = math.radians((280.46646 + T * (36000.76983 + T * 0.0003032)) % 360.0)
-    etime = (y_t * math.sin(2 * l0) - 2 * e * math.sin(Mr)
-             + 4 * e * y_t * math.sin(Mr) * math.cos(2 * l0)
-             - 0.5 * y_t * y_t * math.sin(4 * l0) - 1.25 * e * e * math.sin(2 * Mr))
-    eq_min = math.degrees(etime) * 4
-    day_floor = ((local_midnight + 43200) // 86400) * 86400
-    solar_noon = day_floor + int(720 * 60 - (eq_min + 4 * lon) * 60 + 0.5)
-
-    for label, t in [("Rise", rise_u), ("Noon", solar_noon), ("Golden", golden_eve),
-                     ("Set", set_u), ("Civil", civil_dusk)]:
-        if t and t > now_utc:
-            candidates.append((label, t))
-    if candidates:
-        label, t = min(candidates, key=lambda x: x[1])
+    def fmt_local(t):
         lsec = (t + tz_offset_min * 60) % 86400
-        nh, nm = int(lsec // 3600), int((lsec % 3600) // 60)
-        msg = f"{label} {nh:02d}:{nm:02d}"
-        text_w = draw.textlength(msg, font=font_small)
-        draw.text(((SCREEN_W - text_w) // 2, bot_y + 24), msg, fill=COLOR_BLACK, font=font_small)
+        return f"{int(lsec // 3600):02d}:{int((lsec % 3600) // 60):02d}"
+    if rise and set_:
+        msg = f"{fmt_local(rise)} - {fmt_local(set_)}"
+        tw = draw.textlength(msg, font=font_med)
+        draw.text(((SCREEN_W - tw) // 2, bot_y), msg, fill=COLOR_BLACK, font=font_med)
 
     img.save(out_path)
     print(f"saved {out_path} ({SCREEN_W}x{SCREEN_H})")

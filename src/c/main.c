@@ -39,23 +39,22 @@ static Layer      *s_arrow_layer;
 static GPath      *s_arrow_path;
 
 static TextLayer  *s_clock_layer;
-static TextLayer  *s_loc_layer;
-static TextLayer  *s_az_layer;
-static TextLayer  *s_alt_layer;
-static TextLayer  *s_next_event_layer;
+static TextLayer  *s_gps_layer;       /* compact "* 5m" / "o 2h" / "?" */
+static TextLayer  *s_events_layer;    /* "05:25 - 20:31" centred */
 static Layer      *s_arc_canvas;
 
 static TextLayer  *s_hdg_layer;
 static TextLayer  *s_bearing_layer;
 static TextLayer  *s_status_layer;
+/* AZ/ALT lives in the compass view; not in the main view by default. */
+static TextLayer  *s_compass_az_alt_layer;
 
 /* --- Text buffers ------------------------------------------------------- */
 
 static char s_clock_buf[8];
-static char s_loc_buf[40];
-static char s_az_buf[24];
-static char s_alt_buf[20];
-static char s_next_event_buf[24];
+static char s_gps_buf[12];
+static char s_events_buf[20];
+static char s_compass_az_alt_buf[28];
 
 static char s_hdg_buf[16];
 static char s_bearing_buf[24];
@@ -85,6 +84,17 @@ static const char *cardinal_8(float az_deg) {
     static const char *table[8] = {"N","NE","E","SE","S","SW","W","NW"};
     int idx = (int)((az_deg + 22.5f) / 45.0f) & 7;
     return table[idx];
+}
+
+static void format_event_short(int64_t unix_utc, int tz_offset_min,
+                                char *out, size_t n, const char *prefix) {
+    if (unix_utc == SUN_NEVER_RISES) { snprintf(out, n, "%s--:--", prefix); return; }
+    if (unix_utc == SUN_NEVER_SETS)  { snprintf(out, n, "%salwys", prefix); return; }
+    int64_t local = unix_utc + (int64_t)tz_offset_min * 60;
+    int sec_of_day = (int)(((local % 86400) + 86400) % 86400);
+    int hh = sec_of_day / 3600;
+    int mm = (sec_of_day % 3600) / 60;
+    snprintf(out, n, "%s%02d:%02d", prefix, hh, mm);
 }
 
 static void format_fix_age(int64_t fix_unix, int64_t now_utc, char *out, size_t n) {
@@ -281,39 +291,46 @@ static void refresh_view(void) {
                  clock_is_24h_style() ? "%H:%M" : "%I:%M", lt);
     }
 
-    /* Pebble's snprintf doesn't implement %f, so format each fractional
-     * value as int(whole).int(tenths). */
-    int lat_w = (int)fix.lat_deg;
-    int lat_f = (int)((fix.lat_deg - lat_w) * 100);
-    if (lat_f < 0) lat_f = -lat_f;
-    int lon_w = (int)fix.lon_deg;
-    int lon_f = (int)((fix.lon_deg - lon_w) * 100);
-    if (lon_f < 0) lon_f = -lon_f;
+    /* GPS recency indicator. Solid dot = fix < 1 h, hollow = < 24 h,
+     * "?" = no fix or older than that. The user just needs reassurance
+     * that location data is approximately right for the current spot. */
     if (fix.valid && fix.fix_unix > 0) {
+        int64_t age_sec = real_now_utc - fix.fix_unix;
+        if (age_sec < 0) age_sec = 0;
         char age[8];
         format_fix_age(fix.fix_unix, real_now_utc, age, sizeof age);
-        snprintf(s_loc_buf, sizeof s_loc_buf, "%d.%02d,%d.%02d %s",
-                 lat_w, lat_f, lon_w, lon_f, age);
+        const char *mark = (age_sec < 3600) ? "*"        /* recent: filled */
+                         : (age_sec < 86400) ? "o"       /* stale: hollow */
+                         : "?";                          /* very stale */
+        snprintf(s_gps_buf, sizeof s_gps_buf, "%s %s", mark, age);
     } else {
-        snprintf(s_loc_buf, sizeof s_loc_buf, "seed %d.%02d,%d.%02d",
-                 lat_w, lat_f, lon_w, lon_f);
+        snprintf(s_gps_buf, sizeof s_gps_buf, "? seed");
     }
 
     sun_position_t p = sun_position(now_utc, fix.lat_deg, fix.lon_deg);
     s_last_sun_az  = p.azimuth;
     s_last_sun_alt = p.altitude;
+    /* AZ/ALT shown only on the compass overlay view, not the main one. */
     int az_w = (int)p.azimuth;
     int az_f = (int)((p.azimuth - az_w) * 10);
     int alt_w = (int)p.altitude;
     int alt_f = (int)((p.altitude - alt_w) * 10);
     if (alt_f < 0) alt_f = -alt_f;
-    snprintf(s_az_buf,  sizeof s_az_buf,  "AZ %d.%d %s",
-             az_w, az_f, cardinal_8(p.azimuth));
-    snprintf(s_alt_buf, sizeof s_alt_buf, "ALT %+d.%d", alt_w, alt_f);
+    snprintf(s_compass_az_alt_buf, sizeof s_compass_az_alt_buf,
+             "AZ %d.%d %s   ALT %+d.%d",
+             az_w, az_f, cardinal_8(p.azimuth), alt_w, alt_f);
 
     recompute_arc_if_needed(real_now_utc, &fix);
     ui_arc_set_now(now_utc);
-    describe_next_event(real_now_utc, s_next_event_buf, sizeof s_next_event_buf);
+
+    /* Bottom strip: single centred "HH:MM - HH:MM" for rise / set. The
+     * arc itself already labels both ends so the text doesn't need to
+     * repeat "rise" / "set". */
+    const sun_day_events_t *e = ui_arc_events();
+    char rh[8], sh[8];
+    format_event_short(e->sunrise, fix.tz_offset_min, rh, sizeof rh, "");
+    format_event_short(e->sunset,  fix.tz_offset_min, sh, sizeof sh, "");
+    snprintf(s_events_buf, sizeof s_events_buf, "%s - %s", rh, sh);
 
     redraw_compass_view();
     layer_mark_dirty(window_get_root_layer(s_window));
@@ -448,28 +465,26 @@ static TextLayer *mk_line(Layer *parent, GRect frame, const char *font_key,
 }
 
 static void build_data_view(Layer *parent, GRect b) {
-    /* Header: clock on the left, location pill on the right. */
+    /* Header: clock on the left, compact GPS-recency indicator on the
+     * right (filled/hollow dot + age, e.g. "* 5m" or "o 2h"). */
     s_clock_layer = mk_line(parent, GRect(0, 0, b.size.w * 60 / 100, 22),
                             FONT_KEY_GOTHIC_18_BOLD, GTextAlignmentLeft, s_clock_buf);
-    s_loc_layer   = mk_line(parent, GRect(b.size.w * 60 / 100 - 4, 4,
-                                          b.size.w * 40 / 100, 16),
-                            FONT_KEY_GOTHIC_14, GTextAlignmentRight, s_loc_buf);
+    s_gps_layer   = mk_line(parent, GRect(b.size.w * 60 / 100, 4,
+                                          b.size.w * 40 / 100 - 2, 16),
+                            FONT_KEY_GOTHIC_14, GTextAlignmentRight, s_gps_buf);
 
-    /* Arc canvas occupies the middle of the screen. */
-    int arc_y = 24;
-    int arc_h = b.size.h - arc_y - 44;
+    /* Arc canvas - given more vertical space now that the AZ/ALT row
+     * is gone. Bottom strip is just sunrise / sunset. */
+    int arc_y = 22;
+    int arc_h = b.size.h - arc_y - 22;
     s_arc_canvas = ui_arc_layer_create(GRect(0, arc_y, b.size.w, arc_h));
     layer_add_child(parent, s_arc_canvas);
 
-    /* Bottom strip: AZ on the left, ALT on the right, next-event below. */
+    /* Bottom strip: single centred "HH:MM - HH:MM". */
     int below = arc_y + arc_h + 2;
-    s_az_layer  = mk_line(parent, GRect(2, below, b.size.w / 2 - 2, 20),
-                          FONT_KEY_GOTHIC_18_BOLD, GTextAlignmentLeft, s_az_buf);
-    s_alt_layer = mk_line(parent, GRect(b.size.w / 2, below, b.size.w / 2 - 2, 20),
-                          FONT_KEY_GOTHIC_18_BOLD, GTextAlignmentRight, s_alt_buf);
-    s_next_event_layer = mk_line(parent, GRect(0, below + 20, b.size.w, 18),
-                                 FONT_KEY_GOTHIC_14, GTextAlignmentCenter,
-                                 s_next_event_buf);
+    s_events_layer = mk_line(parent, GRect(0, below, b.size.w, 18),
+                             FONT_KEY_GOTHIC_14_BOLD, GTextAlignmentCenter,
+                             s_events_buf);
 }
 
 static void build_compass_view(Layer *parent, GRect b) {
@@ -478,8 +493,8 @@ static void build_compass_view(Layer *parent, GRect b) {
                           FONT_KEY_GOTHIC_18_BOLD, GTextAlignmentCenter, s_hdg_buf);
 
     /* Arrow occupies the middle square; size based on screen width. */
-    int arrow_size = b.size.w - 24;
-    int arrow_y    = 24;
+    int arrow_size = b.size.w - 32;
+    int arrow_y    = 22;
     s_arrow_layer = layer_create(GRect((b.size.w - arrow_size) / 2,
                                        arrow_y, arrow_size, arrow_size));
     layer_set_update_proc(s_arrow_layer, arrow_update);
@@ -489,7 +504,11 @@ static void build_compass_view(Layer *parent, GRect b) {
     s_bearing_layer = mk_line(parent, GRect(0, below_y, b.size.w, 20),
                               FONT_KEY_GOTHIC_18_BOLD, GTextAlignmentCenter,
                               s_bearing_buf);
-    s_status_layer  = mk_line(parent, GRect(0, below_y + 22, b.size.w, 16),
+    /* Full AZ/ALT line for users who do want the scientific readout. */
+    s_compass_az_alt_layer = mk_line(parent, GRect(0, below_y + 20, b.size.w, 16),
+                                     FONT_KEY_GOTHIC_14, GTextAlignmentCenter,
+                                     s_compass_az_alt_buf);
+    s_status_layer  = mk_line(parent, GRect(0, below_y + 36, b.size.w, 16),
                               FONT_KEY_GOTHIC_14, GTextAlignmentCenter,
                               s_status_buf);
 }
@@ -516,13 +535,12 @@ static void window_load(Window *window) {
 static void window_unload(Window *window) {
     (void)window;
     text_layer_destroy(s_clock_layer);
-    text_layer_destroy(s_loc_layer);
-    text_layer_destroy(s_az_layer);
-    text_layer_destroy(s_alt_layer);
-    text_layer_destroy(s_next_event_layer);
+    text_layer_destroy(s_gps_layer);
+    text_layer_destroy(s_events_layer);
     ui_arc_layer_destroy(s_arc_canvas);
     text_layer_destroy(s_hdg_layer);
     text_layer_destroy(s_bearing_layer);
+    text_layer_destroy(s_compass_az_alt_layer);
     text_layer_destroy(s_status_layer);
     layer_destroy(s_arrow_layer);
     gpath_destroy(s_arrow_path);

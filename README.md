@@ -109,6 +109,31 @@ on the solar-noon azimuth so the arc is always symmetrically visible.
 Field of view is 240° horizontal × 110° vertical (90° above horizon and
 −20° below).
 
+### On-arc data
+
+The arc is decorated with:
+
+- **Hourly notches** — small ticks at each whole local hour where the
+  sun is above the horizon. They give a quick spatial sense of how
+  fast the sun moves through the sky at this latitude / date.
+- **Major markers** at sunrise, solar noon, and sunset — small
+  filled discs with `rise` / `noon` / `set` labels.
+- **The sun ball** at the current time.
+
+The bottom strip shows just `rise HH:MM` on the left and
+`set HH:MM` on the right. The full numeric AZ/ALT readout has been
+pulled out of the default view (it lives on the compass overlay
+behind the Select button) because the on-arc tick marks already
+convey the "is the sun where I expect right now?" answer at a
+glance — this app is for quickly judging how the sun will fall on a
+new location, not for surveying-grade angle look-ups.
+
+The header shows the wall-clock and a compact **GPS recency**
+indicator: `* 5m` means the watch has a phone GPS fix from 5 minutes
+ago (filled marker = within the last hour, hollow `o` = within the
+last 24 h, `?` = no fix). A rough recent fix is all the app needs to
+draw a useful arc.
+
 ### Two-target build
 
 Single source tree compiles for both targets via `package.json`'s
