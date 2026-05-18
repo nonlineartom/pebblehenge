@@ -16,6 +16,12 @@ typedef enum {
 static view_mode_t  s_mode = VIEW_DATA;
 static float        s_last_sun_az  = 0.0f;
 static float        s_last_sun_alt = 0.0f;
+
+/* Timeline scrub: offset (in seconds) from real "now". Up/Down jog. */
+#define SCRUB_STEP_SEC       (10 * 60)
+#define SCRUB_INACTIVITY_SEC 6
+static int32_t      s_scrub_offset_sec = 0;
+static int64_t      s_scrub_last_input_unix = 0;
 static pbh_compass_t s_compass = { .heading_deg = 0.0f,
                                    .status = CompassStatusDataInvalid,
                                    .calibrated = false };
@@ -95,18 +101,20 @@ static void format_fix_age(int64_t fix_unix, int64_t now_utc, char *out, size_t 
     else                  snprintf(out, n, "%dd", (int)(age / 86400));
 }
 
+static void update_app_glance(int64_t now_utc);
+
 static void recompute_arc_if_needed(int64_t now_utc, const geo_fix_t *fix) {
     int local_day = (int)(((now_utc + (int64_t)fix->tz_offset_min * 60) / 86400) & 0xFFFF);
     if (local_day == s_events_day) return;
     ui_arc_set_now(now_utc);
     ui_arc_recompute(fix);
     s_events_day = local_day;
+    update_app_glance(now_utc);
 }
 
-static void describe_next_event(int64_t now_utc, char *out, size_t n) {
+static bool find_next_event(int64_t now_utc, const char **out_label,
+                            int64_t *out_when) {
     const sun_day_events_t *e = ui_arc_events();
-    geo_fix_t fix = geo_current();
-
     struct { const char *label; int64_t when; } cands[] = {
         { "Rise",   e->sunrise },
         { "Noon",   e->solar_noon },
@@ -122,15 +130,56 @@ static void describe_next_event(int64_t now_utc, char *out, size_t n) {
         if (w == SUN_NEVER_RISES || w == SUN_NEVER_SETS) continue;
         if (w > now_utc && w < best) { best = w; label = cands[i].label; when = w; }
     }
-    if (best == ((int64_t)1 << 62)) {
+    if (best == ((int64_t)1 << 62)) return false;
+    *out_label = label;
+    *out_when  = when;
+    return true;
+}
+
+static void describe_next_event(int64_t now_utc, char *out, size_t n) {
+    const char *label;
+    int64_t when;
+    if (!find_next_event(now_utc, &label, &when)) {
         snprintf(out, n, "-");
         return;
     }
-    char hm[8];
+    geo_fix_t fix = geo_current();
     int64_t local = when + (int64_t)fix.tz_offset_min * 60;
     int sec = (int)(((local % 86400) + 86400) % 86400);
-    snprintf(hm, sizeof hm, "%02d:%02d", sec / 3600, (sec % 3600) / 60);
-    snprintf(out, n, "%s %s", label, hm);
+    snprintf(out, n, "%s %02d:%02d", label, sec / 3600, (sec % 3600) / 60);
+}
+
+typedef struct {
+    char    text[24];
+    int64_t expire;
+} glance_payload_t;
+
+static void glance_reload_cb(AppGlanceReloadSession *session, size_t limit, void *context) {
+    if (limit < 1) return;
+    glance_payload_t *p = (glance_payload_t *)context;
+    AppGlanceSlice slice = (AppGlanceSlice){
+        .layout = {
+            .icon = 0,                /* fall back to the app's own icon */
+            .subtitle_template_string = p->text,
+        },
+        .expiration_time = (time_t)p->expire,
+    };
+    app_glance_add_slice(session, slice);
+}
+
+static void update_app_glance(int64_t now_utc) {
+    const char *label;
+    int64_t when;
+    if (!find_next_event(now_utc, &label, &when)) return;
+    geo_fix_t fix = geo_current();
+    int64_t local = when + (int64_t)fix.tz_offset_min * 60;
+    int sec = (int)(((local % 86400) + 86400) % 86400);
+
+    static glance_payload_t payload;
+    snprintf(payload.text, sizeof payload.text, "%s %02d:%02d",
+             label, sec / 3600, (sec % 3600) / 60);
+    payload.expire = when;
+    app_glance_reload(glance_reload_cb, &payload);
 }
 
 static float bearing_delta(float sun_az_deg, float heading_deg) {
@@ -211,17 +260,30 @@ static void redraw_compass_view(void) {
 static void refresh_view(void) {
     time_t now;
     time(&now);
-    int64_t now_utc = (int64_t)now;
+    int64_t real_now_utc = (int64_t)now;
+
+    /* Auto-release the scrub after a few seconds of no input. */
+    if (s_scrub_offset_sec != 0
+        && real_now_utc - s_scrub_last_input_unix > SCRUB_INACTIVITY_SEC) {
+        s_scrub_offset_sec = 0;
+    }
+    int64_t now_utc = real_now_utc + s_scrub_offset_sec;
+    bool scrubbing = (s_scrub_offset_sec != 0);
 
     geo_fix_t fix = geo_current();
 
-    struct tm *lt = localtime(&now);
-    strftime(s_clock_buf, sizeof s_clock_buf,
-             clock_is_24h_style() ? "%H:%M" : "%I:%M", lt);
+    time_t display_time = (time_t)now_utc;
+    struct tm *lt = localtime(&display_time);
+    if (scrubbing) {
+        strftime(s_clock_buf, sizeof s_clock_buf, "*%H:%M", lt);
+    } else {
+        strftime(s_clock_buf, sizeof s_clock_buf,
+                 clock_is_24h_style() ? "%H:%M" : "%I:%M", lt);
+    }
 
     if (fix.valid && fix.fix_unix > 0) {
         char age[8];
-        format_fix_age(fix.fix_unix, now_utc, age, sizeof age);
+        format_fix_age(fix.fix_unix, real_now_utc, age, sizeof age);
         snprintf(s_loc_buf, sizeof s_loc_buf, "%.2f,%.2f %s",
                  fix.lat_deg, fix.lon_deg, age);
     } else {
@@ -235,9 +297,9 @@ static void refresh_view(void) {
     snprintf(s_az_buf,  sizeof s_az_buf,  "AZ %5.1f %s", p.azimuth, cardinal_8(p.azimuth));
     snprintf(s_alt_buf, sizeof s_alt_buf, "ALT %+5.1f", p.altitude);
 
-    recompute_arc_if_needed(now_utc, &fix);
+    recompute_arc_if_needed(real_now_utc, &fix);
     ui_arc_set_now(now_utc);
-    describe_next_event(now_utc, s_next_event_buf, sizeof s_next_event_buf);
+    describe_next_event(real_now_utc, s_next_event_buf, sizeof s_next_event_buf);
 
     redraw_compass_view();
     layer_mark_dirty(window_get_root_layer(s_window));
@@ -303,9 +365,42 @@ static void select_click(ClickRecognizerRef ref, void *context) {
     apply_mode();
 }
 
+static void scrub_by(int32_t delta_sec) {
+    s_scrub_offset_sec += delta_sec;
+    /* Clamp to +/- 24 hours so we stay inside today's arc cache. */
+    if (s_scrub_offset_sec >  12 * 3600) s_scrub_offset_sec =  12 * 3600;
+    if (s_scrub_offset_sec < -12 * 3600) s_scrub_offset_sec = -12 * 3600;
+    s_scrub_last_input_unix = (int64_t)time(NULL);
+    refresh_view();
+}
+
+static void up_click(ClickRecognizerRef ref, void *context) {
+    (void)ref; (void)context;
+    scrub_by(+SCRUB_STEP_SEC);
+}
+
+static void down_click(ClickRecognizerRef ref, void *context) {
+    (void)ref; (void)context;
+    scrub_by(-SCRUB_STEP_SEC);
+}
+
+static void up_long_click(ClickRecognizerRef ref, void *context) {
+    (void)ref; (void)context;
+    scrub_by(+60 * 60);
+}
+
+static void down_long_click(ClickRecognizerRef ref, void *context) {
+    (void)ref; (void)context;
+    scrub_by(-60 * 60);
+}
+
 static void click_config_provider(void *context) {
     (void)context;
     window_single_click_subscribe(BUTTON_ID_SELECT, select_click);
+    window_single_repeating_click_subscribe(BUTTON_ID_UP,   200, up_click);
+    window_single_repeating_click_subscribe(BUTTON_ID_DOWN, 200, down_click);
+    window_long_click_subscribe(BUTTON_ID_UP,   500, up_long_click,   NULL);
+    window_long_click_subscribe(BUTTON_ID_DOWN, 500, down_long_click, NULL);
 }
 
 /* --- Layer construction ------------------------------------------------ */
