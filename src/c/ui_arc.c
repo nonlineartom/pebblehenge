@@ -54,9 +54,9 @@ void ui_arc_recompute(const geo_fix_t *fix) {
         s_now_utc ? s_now_utc : (int64_t)(int32_t)time(NULL), fix->tz_offset_min);
     s_tz_offset_min = fix->tz_offset_min;
     for (int i = 0; i < ARC_SAMPLE_COUNT; i++) {
-        int64_t t = s_local_midnight_utc + (int64_t)i * 1800;
+        int64_t t = s_local_midnight_utc + (int64_t)i * (ARC_SAMPLE_STEP_MIN * 60);
         sun_position_t p = sun_position(t, fix->lat_deg, fix->lon_deg);
-        s_samples[i].minutes_from_local_midnight = (int16_t)(i * 30);
+        s_samples[i].minutes_from_local_midnight = (int16_t)(i * ARC_SAMPLE_STEP_MIN);
         s_samples[i].altitude_deg = p.altitude;
         s_samples[i].azimuth_deg  = p.azimuth;
     }
@@ -163,9 +163,9 @@ static void sun_at_now(int64_t now_utc, float *az, float *alt) {
     int minutes = (int)((now_utc - s_local_midnight_utc) / 60);
     if (minutes < 0) minutes = 0;
     if (minutes > 1440) minutes = 1440;
-    int idx = minutes / 30;
+    int idx = minutes / ARC_SAMPLE_STEP_MIN;
     if (idx >= ARC_SAMPLE_COUNT - 1) idx = ARC_SAMPLE_COUNT - 2;
-    float f = (float)(minutes - idx * 30) / 30.0f;
+    float f = (float)(minutes - idx * ARC_SAMPLE_STEP_MIN) / (float)ARC_SAMPLE_STEP_MIN;
     /* Linear interp for altitude. */
     *alt = s_samples[idx].altitude_deg
          + (s_samples[idx + 1].altitude_deg - s_samples[idx].altitude_deg) * f;
@@ -257,6 +257,10 @@ static void draw_arc_segment(GContext *ctx, GRect b,
 
 static void draw_arc(GContext *ctx, GRect b) {
     if (!s_samples_valid) return;
+#if defined(PBL_COLOR)
+    /* Anti-aliased lines on Time 2 / colour displays. No-op on diorite. */
+    graphics_context_set_antialiased(ctx, true);
+#endif
     for (int i = 1; i < ARC_SAMPLE_COUNT; i++) {
         float off0 = az_offset_deg(s_samples[i - 1].azimuth_deg);
         float off1 = az_offset_deg(s_samples[i].azimuth_deg);
@@ -264,6 +268,9 @@ static void draw_arc(GContext *ctx, GRect b) {
                          off0, s_samples[i - 1].altitude_deg,
                          off1, s_samples[i].altitude_deg);
     }
+#if defined(PBL_COLOR)
+    graphics_context_set_antialiased(ctx, false);
+#endif
 }
 
 static int16_t event_to_local_minutes(int64_t event_unix_utc) {
@@ -280,9 +287,9 @@ static int16_t event_to_local_minutes(int64_t event_unix_utc) {
 static void sun_at_minutes(int minutes, float *az, float *alt) {
     if (minutes < 0) minutes = 0;
     if (minutes > 1440) minutes = 1440;
-    int idx = minutes / 30;
+    int idx = minutes / ARC_SAMPLE_STEP_MIN;
     if (idx >= ARC_SAMPLE_COUNT - 1) idx = ARC_SAMPLE_COUNT - 2;
-    float f = (float)(minutes - idx * 30) / 30.0f;
+    float f = (float)(minutes - idx * ARC_SAMPLE_STEP_MIN) / (float)ARC_SAMPLE_STEP_MIN;
     *alt = s_samples[idx].altitude_deg
          + (s_samples[idx + 1].altitude_deg - s_samples[idx].altitude_deg) * f;
     float a = s_samples[idx].azimuth_deg;
@@ -319,9 +326,9 @@ static void draw_endpoint(GContext *ctx, GRect b, int local_minutes,
 /* Interpolate (az, alt) at any minute-of-the-local-day. Caller has
  * already validated 0 <= minutes <= 1440. */
 static void sun_at_minutes_simple(int minutes, float *az, float *alt) {
-    int idx = minutes / 30;
+    int idx = minutes / ARC_SAMPLE_STEP_MIN;
     if (idx >= ARC_SAMPLE_COUNT - 1) idx = ARC_SAMPLE_COUNT - 2;
-    float f = (float)(minutes - idx * 30) / 30.0f;
+    float f = (float)(minutes - idx * ARC_SAMPLE_STEP_MIN) / (float)ARC_SAMPLE_STEP_MIN;
     *alt = s_samples[idx].altitude_deg
          + (s_samples[idx + 1].altitude_deg - s_samples[idx].altitude_deg) * f;
     float a = s_samples[idx].azimuth_deg;

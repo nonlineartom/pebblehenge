@@ -14,7 +14,12 @@ typedef struct {
     float   azimuth_deg;
 } arc_sample_t;
 
-#define ARC_SAMPLE_COUNT 49  /* every 30 minutes across the local day */
+/* Sample cadence in minutes. Smaller -> smoother arc but more memory.
+ * 5 min => 289 samples => ~3.4 KB; pixel-perfect on the diorite's 144-
+ * wide canvas at any heading because consecutive samples are at most
+ * ~1 px apart in screen space. */
+#define ARC_SAMPLE_STEP_MIN  5
+#define ARC_SAMPLE_COUNT     (1440 / ARC_SAMPLE_STEP_MIN + 1)  /* 289 */
 
 /* Recompute the day's arc samples and events for the given fix. Call
  * whenever the fix changes or the local day rolls over. */

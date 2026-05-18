@@ -24,7 +24,8 @@ HORIZON_FRAC_DEN = 100
 ALT_TOP_DEG    = 90.0
 ALT_BOTTOM_DEG = -20.0
 FOV_DEG        = 240.0
-ARC_SAMPLE_COUNT = 49
+ARC_SAMPLE_STEP_MIN = 5
+ARC_SAMPLE_COUNT = 1440 // ARC_SAMPLE_STEP_MIN + 1   # 289
 
 # Pebble GColor* approximations (the Pebble color palette is a 6-bit cube).
 COLOR_PICTON_BLUE  = (85, 170, 255)     # GColorPictonBlue
@@ -129,7 +130,7 @@ def render(now_utc, lat, lon, tz_offset_min, heading_deg=None, out_path="/tmp/em
     local_midnight = ((now_utc + tz_offset_min * 60) // 86400) * 86400 - tz_offset_min * 60
     samples = []
     for i in range(ARC_SAMPLE_COUNT):
-        t = local_midnight + i * 1800
+        t = local_midnight + i * (ARC_SAMPLE_STEP_MIN * 60)
         az, alt = sun_position(t, lat, lon)
         samples.append((az, alt))
 
