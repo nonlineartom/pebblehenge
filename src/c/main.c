@@ -51,9 +51,9 @@ static TextLayer  *s_status_layer;
 /* --- Text buffers ------------------------------------------------------- */
 
 static char s_clock_buf[8];
-static char s_loc_buf[24];
-static char s_az_buf[20];
-static char s_alt_buf[16];
+static char s_loc_buf[40];
+static char s_az_buf[24];
+static char s_alt_buf[20];
 static char s_next_event_buf[24];
 
 static char s_hdg_buf[16];
@@ -250,10 +250,17 @@ static void redraw_compass_view(void) {
     layer_mark_dirty(s_arrow_layer);
 }
 
+/* Pebble's runtime returns time as a 32-bit value, but newer arm-none-eabi
+ * newlib defines time_t as 64-bit; the high bits come back as uninitialised
+ * stack noise. Truncate explicitly. */
+static int64_t now_unix_utc(void) {
+    int32_t t = (int32_t)time(NULL);
+    return (int64_t)t;
+}
+
 static void refresh_view(void) {
-    time_t now;
-    time(&now);
-    int64_t real_now_utc = (int64_t)now;
+    int64_t real_now_utc = now_unix_utc();
+    time_t now = (time_t)real_now_utc;
 
     /* Auto-release the scrub after a few seconds of no input. */
     if (s_scrub_offset_sec != 0
@@ -274,21 +281,35 @@ static void refresh_view(void) {
                  clock_is_24h_style() ? "%H:%M" : "%I:%M", lt);
     }
 
+    /* Pebble's snprintf doesn't implement %f, so format each fractional
+     * value as int(whole).int(tenths). */
+    int lat_w = (int)fix.lat_deg;
+    int lat_f = (int)((fix.lat_deg - lat_w) * 100);
+    if (lat_f < 0) lat_f = -lat_f;
+    int lon_w = (int)fix.lon_deg;
+    int lon_f = (int)((fix.lon_deg - lon_w) * 100);
+    if (lon_f < 0) lon_f = -lon_f;
     if (fix.valid && fix.fix_unix > 0) {
         char age[8];
         format_fix_age(fix.fix_unix, real_now_utc, age, sizeof age);
-        snprintf(s_loc_buf, sizeof s_loc_buf, "%.2f,%.2f %s",
-                 fix.lat_deg, fix.lon_deg, age);
+        snprintf(s_loc_buf, sizeof s_loc_buf, "%d.%02d,%d.%02d %s",
+                 lat_w, lat_f, lon_w, lon_f, age);
     } else {
-        snprintf(s_loc_buf, sizeof s_loc_buf, "seed %.2f,%.2f",
-                 fix.lat_deg, fix.lon_deg);
+        snprintf(s_loc_buf, sizeof s_loc_buf, "seed %d.%02d,%d.%02d",
+                 lat_w, lat_f, lon_w, lon_f);
     }
 
     sun_position_t p = sun_position(now_utc, fix.lat_deg, fix.lon_deg);
     s_last_sun_az  = p.azimuth;
     s_last_sun_alt = p.altitude;
-    snprintf(s_az_buf,  sizeof s_az_buf,  "AZ %5.1f %s", p.azimuth, cardinal_8(p.azimuth));
-    snprintf(s_alt_buf, sizeof s_alt_buf, "ALT %+5.1f", p.altitude);
+    int az_w = (int)p.azimuth;
+    int az_f = (int)((p.azimuth - az_w) * 10);
+    int alt_w = (int)p.altitude;
+    int alt_f = (int)((p.altitude - alt_w) * 10);
+    if (alt_f < 0) alt_f = -alt_f;
+    snprintf(s_az_buf,  sizeof s_az_buf,  "AZ %d.%d %s",
+             az_w, az_f, cardinal_8(p.azimuth));
+    snprintf(s_alt_buf, sizeof s_alt_buf, "ALT %+d.%d", alt_w, alt_f);
 
     recompute_arc_if_needed(real_now_utc, &fix);
     ui_arc_set_now(now_utc);
@@ -308,6 +329,17 @@ static void on_minute_tick(struct tm *tick_time, TimeUnits units_changed) {
 
 static void on_compass_sample(pbh_compass_t sample) {
     s_compass = sample;
+    /* Feed the sky-arc renderer so the main view rotates as the user
+     * turns. When the compass isn't calibrated yet, fall back to
+     * north-up (heading = -1) so the user still sees the day's path. */
+    /* Only a fully calibrated reading is trustworthy; anything else
+     * (DataInvalid, Calibrating, or the emulator's -1 "unavailable")
+     * leaves the view auto-centred on solar noon. */
+    if (sample.status == CompassStatusCalibrated) {
+        ui_arc_set_heading(sample.heading_deg);
+    } else {
+        ui_arc_set_heading(-1.0f);
+    }
     redraw_compass_view();
 }
 
@@ -326,7 +358,7 @@ static void inbox_received(DictionaryIterator *iter, void *context) {
         float lat = (float)t_lat->value->int32 / 1.0e7f;
         float lon = (float)t_lon->value->int32 / 1.0e7f;
         int16_t tz = (int16_t)t_tz->value->int32;
-        int64_t fix_ts = t_ts ? (int64_t)t_ts->value->int32 : (int64_t)time(NULL);
+        int64_t fix_ts = t_ts ? (int64_t)t_ts->value->int32 : (int64_t)(int32_t)time(NULL);
         geo_set(lat, lon, tz, fix_ts);
         invalidate_events_cache();
     }
@@ -363,7 +395,7 @@ static void scrub_by(int32_t delta_sec) {
     /* Clamp to +/- 24 hours so we stay inside today's arc cache. */
     if (s_scrub_offset_sec >  12 * 3600) s_scrub_offset_sec =  12 * 3600;
     if (s_scrub_offset_sec < -12 * 3600) s_scrub_offset_sec = -12 * 3600;
-    s_scrub_last_input_unix = (int64_t)time(NULL);
+    s_scrub_last_input_unix = (int64_t)(int32_t)time(NULL);
     refresh_view();
 }
 

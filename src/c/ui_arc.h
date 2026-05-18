@@ -26,6 +26,12 @@ const sun_day_events_t *ui_arc_events(void);
 /* Set the "now" marker (UTC unix time). Triggers a layer redraw. */
 void ui_arc_set_now(int64_t now_utc);
 
+/* Set the observer's true heading in degrees (0..360). Triggers a redraw
+ * so the sky arc centres on whatever direction the user is facing. Pass
+ * a negative number to render in "north-up" absolute mode (used when the
+ * compass is uncalibrated). */
+void ui_arc_set_heading(float heading_deg);
+
 /* Lifecycle for the canvas. The Layer's update_proc reads from the
  * cached samples plus current-now and renders bands + arc curve. */
 Layer *ui_arc_layer_create(GRect frame);
