@@ -2,6 +2,7 @@
  * golden-hour bands underneath and a "now" marker. Color path uses
  * shaded GColor rects; mono path uses hatch patterns. */
 
+#include <sys/types.h>
 #include "ui_arc.h"
 
 #include <stdbool.h>

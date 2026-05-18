@@ -1,3 +1,6 @@
+#include <sys/types.h>  /* time_t typedef (Pebble's pebble.h relies on it
+                         * being in scope, but newer newlib time.h is
+                         * suppressed by the SDK's -D_TIME_H_). */
 #include <pebble.h>
 
 #include "sun.h"
@@ -81,16 +84,6 @@ static const char *cardinal_8(float az_deg) {
     static const char *table[8] = {"N","NE","E","SE","S","SW","W","NW"};
     int idx = (int)((az_deg + 22.5f) / 45.0f) & 7;
     return table[idx];
-}
-
-static void format_local_hm(int64_t unix_utc, int tz_offset_min, char *out, size_t n) {
-    if (unix_utc == SUN_NEVER_RISES) { snprintf(out, n, "--:--"); return; }
-    if (unix_utc == SUN_NEVER_SETS)  { snprintf(out, n, "always"); return; }
-    int64_t local = unix_utc + (int64_t)tz_offset_min * 60;
-    int sec_of_day = (int)(((local % 86400) + 86400) % 86400);
-    int hh = sec_of_day / 3600;
-    int mm = (sec_of_day % 3600) / 60;
-    snprintf(out, n, "%02d:%02d", hh, mm);
 }
 
 static void format_fix_age(int64_t fix_unix, int64_t now_utc, char *out, size_t n) {
