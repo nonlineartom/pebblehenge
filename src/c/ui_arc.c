@@ -237,154 +237,46 @@ static void draw_cardinal_ticks(GContext *ctx, GRect b) {
     }
 }
 
-/* Float-precision projection of one sample. Returns false if the sample
- * is outside the canvas / FOV. */
-static bool project_sample_f(int i, GRect b, float *xf, float *yf) {
-    float off = az_offset_deg(s_samples[i].azimuth_deg);
-    if (off < -FOV_DEG / 2.0f || off > FOV_DEG / 2.0f) return false;
-    float t_x = (off + FOV_DEG / 2.0f) / FOV_DEG;
-    *xf = (float)b.origin.x + t_x * (float)(b.size.w - 1);
+/* Plain 1-bit line raster: 2-px stroke for the above-horizon arc, 1-px
+ * for the below-horizon segment. A Wu-style dithered raster was tried
+ * and looked noisy on the physically-large 144x168 e-paper pixel - the
+ * dither matrix needed brain-integration distance the watch doesn't
+ * have. Dense (5-min) sampling + a 2-px stroke is what works there. */
 
-    int horizon_y = horizon_y_for(b);
-    float alt = s_samples[i].altitude_deg;
-    if (alt >= 0.0f) {
-        int top_y = b.origin.y + 2;
-        float t = alt / ALT_TOP_DEG;
-        if (t > 1.0f) t = 1.0f;
-        *yf = (float)horizon_y - t * (float)(horizon_y - top_y);
-    } else {
-        int bottom_y = b.origin.y + b.size.h - 1;
-        float t = alt / ALT_BOTTOM_DEG;
-        if (t > 1.0f) t = 1.0f;
-        *yf = (float)horizon_y + t * (float)(bottom_y - horizon_y);
-    }
-    return true;
-}
-
-/* 4x4 ordered Bayer matrix; thresholds 0..15. plot if intensity*16 >
- * threshold. The pattern is the standard one used in OS-level image
- * dithering and gives the most natural sub-pixel feel without making
- * the curve visibly checkered. */
-static const uint8_t s_bayer[4][4] = {
-    {  0,  8,  2, 10 },
-    { 12,  4, 14,  6 },
-    {  3, 11,  1,  9 },
-    { 15,  7, 13,  5 },
-};
-
-/* 1-bit pixel plot, weighted by intensity in [0,1]. The pixel turns on
- * iff intensity*16 exceeds the Bayer threshold at (x mod 4, y mod 4).
- * Over a few pixels the eye reads this as a sub-pixel-positioned line. */
-static inline void dither_plot(GContext *ctx, int x, int y, float intensity) {
-    if (intensity <= 0.0f) return;
-    if (intensity >= 1.0f) { graphics_draw_pixel(ctx, GPoint(x, y)); return; }
-    uint8_t th = s_bayer[((unsigned)x) & 3u][((unsigned)y) & 3u];
-    if (intensity * 16.0f > (float)th) {
-        graphics_draw_pixel(ctx, GPoint(x, y));
-    }
-}
-
-#if defined(PBL_BW)
-/* Smooth 1-bit curve raster: between every adjacent pair of samples,
- * walk each integer canvas-x they straddle, linearly interpolate the
- * float y at that x, and stipple two vertically-adjacent pixels using
- * Bayer-dithered Wu weights (intensity_upper = 1 - y_frac,
- * intensity_lower = y_frac). The result looks like a sub-pixel-
- * positioned curve even though the framebuffer is 1-bit. */
-static void draw_arc_dithered_bw(GContext *ctx, GRect b) {
-    graphics_context_set_stroke_color(ctx, GColorBlack);
-    int min_x = b.origin.x, max_x = b.origin.x + b.size.w - 1;
-    int min_y = b.origin.y, max_y = b.origin.y + b.size.h - 1;
-
-    float prev_xf = 0.0f, prev_yf = 0.0f;
-    bool  have_prev = false;
-
-    for (int i = 0; i < ARC_SAMPLE_COUNT; i++) {
-        /* Only the above-horizon portion gets the smooth treatment.
-         * The below-horizon segment falls through to the dotted style
-         * draw_arc_segment uses, kept below for night legibility. */
-        if (s_samples[i].altitude_deg < -0.5f) { have_prev = false; continue; }
-
-        float xf, yf;
-        if (!project_sample_f(i, b, &xf, &yf)) { have_prev = false; continue; }
-
-        if (have_prev) {
-            float dx = xf - prev_xf;
-            int x0, x1;
-            if (prev_xf <= xf) { x0 = (int)(prev_xf + 0.5f); x1 = (int)(xf + 0.5f); }
-            else               { x0 = (int)(xf      + 0.5f); x1 = (int)(prev_xf + 0.5f); }
-            for (int x = x0; x <= x1; x++) {
-                if (x < min_x || x > max_x) continue;
-                float t = (dx == 0.0f) ? 0.0f : ((float)x - prev_xf) / dx;
-                if (t < 0.0f) t = 0.0f; else if (t > 1.0f) t = 1.0f;
-                float y = prev_yf + t * (yf - prev_yf);
-                int yi = (int)y;
-                if (y < 0.0f && y != (float)yi) yi--;  /* floor for negatives */
-                float yfrac = y - (float)yi;
-                if (yi     >= min_y && yi     <= max_y) dither_plot(ctx, x, yi,     1.0f - yfrac);
-                if (yi + 1 >= min_y && yi + 1 <= max_y) dither_plot(ctx, x, yi + 1, yfrac);
-            }
-        }
-        prev_xf = xf;
-        prev_yf = yf;
-        have_prev = true;
-    }
-}
-
-/* Below-horizon segments still drawn as a thin dotted 1-px line so the
- * user can see the sun's path under the ground. */
-static void draw_arc_below_horizon_bw(GContext *ctx, GRect b) {
-    graphics_context_set_stroke_color(ctx, GColorBlack);
-    graphics_context_set_stroke_width(ctx, 1);
-    int last = -1;
-    for (int i = 0; i < ARC_SAMPLE_COUNT; i++) {
-        if (s_samples[i].altitude_deg >= 0.0f) { last = -1; continue; }
-        if (last >= 0 && (i & 1)) {  /* dotted: skip every other segment */
-            float off0 = az_offset_deg(s_samples[last].azimuth_deg);
-            float off1 = az_offset_deg(s_samples[i].azimuth_deg);
-            float d = off1 - off0;
-            if (d > -180.0f && d < 180.0f) {
-                graphics_draw_line(ctx,
-                    GPoint(x_for_offset(off0, b), y_for_altitude(s_samples[last].altitude_deg, b)),
-                    GPoint(x_for_offset(off1, b), y_for_altitude(s_samples[i].altitude_deg,    b)));
-            }
-        }
-        last = i;
-    }
-}
-#endif /* PBL_BW */
-
-#if defined(PBL_COLOR)
-/* Connect two consecutive samples with an anti-aliased line. */
-static void draw_arc_segment_color(GContext *ctx, GRect b,
-                                    float off0, float alt0,
-                                    float off1, float alt1) {
+/* Single line segment between two adjacent samples. Below-horizon
+ * segments draw thinner so the visible day arc stands out. */
+static void draw_arc_segment(GContext *ctx, GRect b,
+                              float off0, float alt0,
+                              float off1, float alt1) {
     float d = off1 - off0;
     if (d > 180.0f || d < -180.0f) return;
     GPoint p0 = GPoint(x_for_offset(off0, b), y_for_altitude(alt0, b));
     GPoint p1 = GPoint(x_for_offset(off1, b), y_for_altitude(alt1, b));
     bool below = (alt0 < 0.0f && alt1 < 0.0f);
+#if defined(PBL_COLOR)
     graphics_context_set_stroke_width(ctx, below ? 1 : 3);
+#else
+    graphics_context_set_stroke_width(ctx, below ? 1 : 2);
+#endif
     graphics_draw_line(ctx, p0, p1);
 }
-#endif
 
 static void draw_arc(GContext *ctx, GRect b) {
     if (!s_samples_valid) return;
-#if defined(PBL_COLOR)
-    graphics_context_set_antialiased(ctx, true);
     graphics_context_set_stroke_color(ctx, GColorBlack);
+#if defined(PBL_COLOR)
+    /* SDK rasteriser anti-aliasing - only on colour platforms. */
+    graphics_context_set_antialiased(ctx, true);
+#endif
     for (int i = 1; i < ARC_SAMPLE_COUNT; i++) {
         float off0 = az_offset_deg(s_samples[i - 1].azimuth_deg);
         float off1 = az_offset_deg(s_samples[i].azimuth_deg);
-        draw_arc_segment_color(ctx, b,
-                               off0, s_samples[i - 1].altitude_deg,
-                               off1, s_samples[i].altitude_deg);
+        draw_arc_segment(ctx, b,
+                         off0, s_samples[i - 1].altitude_deg,
+                         off1, s_samples[i].altitude_deg);
     }
+#if defined(PBL_COLOR)
     graphics_context_set_antialiased(ctx, false);
-#else
-    draw_arc_below_horizon_bw(ctx, b);
-    draw_arc_dithered_bw(ctx, b);
 #endif
 }
 
