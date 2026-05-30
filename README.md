@@ -266,9 +266,18 @@ not supported by protocol` on environments without IPv6.
 
 ```sh
 source ~/pebble-venv/bin/activate
-pebble build       # produces build/pebblehenge.pbw
-make -C test test  # host-side sun algorithm tests (13/13)
+./scripts/build.sh   # produces build/pebblehenge-<version>-<hash>.pbw
+make -C test test    # host-side sun algorithm tests (13/13)
 ```
+
+`scripts/build.sh` stamps the current git short hash into the bundle's
+`versionLabel` so every .pbw is uniquely identifiable - the same string
+appears in the Pebble phone app under the installed app's details, so
+any artifact can be cross-referenced to a git commit unambiguously.
+The base version (`0.2` currently) lives in `package.json`'s
+`pebble.versionLabel`; bump it manually when you cross a phase
+boundary. The script reverts `package.json` on exit so the working
+tree stays clean.
 
 ### Run
 
