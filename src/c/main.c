@@ -52,7 +52,7 @@ static TextLayer  *s_compass_az_alt_layer;
 /* --- Text buffers ------------------------------------------------------- */
 
 static char s_clock_buf[8];
-static char s_gps_buf[12];
+static char s_gps_buf[20];
 static char s_events_buf[20];
 static char s_compass_az_alt_buf[28];
 
@@ -95,6 +95,48 @@ static void format_event_short(int64_t unix_utc, int tz_offset_min,
     int hh = sec_of_day / 3600;
     int mm = (sec_of_day % 3600) / 60;
     snprintf(out, n, "%s%02d:%02d", prefix, hh, mm);
+}
+
+/* Build the status string shown in the top-right of the data view:
+ *    "<compass-letter><heading>  <gps-marker><age>"
+ * Compass letter:  K = Calibrated, C = Calibrating, I = DataInvalid,
+ *                  ? = anything else (incl. the QEMU "-1" sentinel).
+ * GPS marker:      * = fix < 1 h, o = fix < 24 h, ? = no/old fix.
+ * This is a diagnostic; once we know what the compass is reporting on
+ * the real watch we can tighten it back up. */
+static void format_status_buf(int64_t now_utc, const geo_fix_t *fix) {
+    char comp_part[8];
+    char comp_mark;
+    switch ((int)s_compass.status) {
+        case CompassStatusCalibrated:  comp_mark = 'K'; break;
+        case CompassStatusCalibrating: comp_mark = 'C'; break;
+        case CompassStatusDataInvalid: comp_mark = 'I'; break;
+        default:                       comp_mark = '?'; break;
+    }
+    if (s_compass.status == CompassStatusCalibrated ||
+        s_compass.status == CompassStatusCalibrating) {
+        int h = (int)(s_compass.heading_deg + 0.5f);
+        while (h <    0) h += 360;
+        while (h >= 360) h -= 360;
+        snprintf(comp_part, sizeof comp_part, "%c%03d", comp_mark, h);
+    } else {
+        snprintf(comp_part, sizeof comp_part, "%c---", comp_mark);
+    }
+
+    char gps_part[8];
+    if (fix->valid && fix->fix_unix > 0) {
+        int64_t a = now_utc - fix->fix_unix;
+        if (a < 0) a = 0;
+        char m = (a < 3600) ? '*' : (a < 86400) ? 'o' : '?';
+        if (a < 60)         snprintf(gps_part, sizeof gps_part, "%c%ds", m, (int)a);
+        else if (a < 3600)  snprintf(gps_part, sizeof gps_part, "%c%dm", m, (int)(a / 60));
+        else if (a < 86400) snprintf(gps_part, sizeof gps_part, "%c%dh", m, (int)(a / 3600));
+        else                snprintf(gps_part, sizeof gps_part, "%c%dd", m, (int)(a / 86400));
+    } else {
+        snprintf(gps_part, sizeof gps_part, "?seed");
+    }
+
+    snprintf(s_gps_buf, sizeof s_gps_buf, "%s %s", comp_part, gps_part);
 }
 
 static void format_fix_age(int64_t fix_unix, int64_t now_utc, char *out, size_t n) {
@@ -291,21 +333,7 @@ static void refresh_view(void) {
                  clock_is_24h_style() ? "%H:%M" : "%I:%M", lt);
     }
 
-    /* GPS recency indicator. Solid dot = fix < 1 h, hollow = < 24 h,
-     * "?" = no fix or older than that. The user just needs reassurance
-     * that location data is approximately right for the current spot. */
-    if (fix.valid && fix.fix_unix > 0) {
-        int64_t age_sec = real_now_utc - fix.fix_unix;
-        if (age_sec < 0) age_sec = 0;
-        char age[8];
-        format_fix_age(fix.fix_unix, real_now_utc, age, sizeof age);
-        const char *mark = (age_sec < 3600) ? "*"        /* recent: filled */
-                         : (age_sec < 86400) ? "o"       /* stale: hollow */
-                         : "?";                          /* very stale */
-        snprintf(s_gps_buf, sizeof s_gps_buf, "%s %s", mark, age);
-    } else {
-        snprintf(s_gps_buf, sizeof s_gps_buf, "? seed");
-    }
+    format_status_buf(real_now_utc, &fix);
 
     sun_position_t p = sun_position(now_utc, fix.lat_deg, fix.lon_deg);
     s_last_sun_az  = p.azimuth;
@@ -351,20 +379,25 @@ static void on_imu_sample(pbh_attitude_t att) {
 static void on_compass_sample(pbh_compass_t sample) {
     s_compass = sample;
     /* Feed the sky-arc renderer so the main view rotates as the user
-     * turns. When the compass isn't calibrated yet, fall back to
-     * north-up (heading = -1) so the user still sees the day's path. */
-    /* Use any heading we're given - Calibrated is best, but Calibrating
-     * still provides a usable rough heading (just with reduced
-     * confidence), and on the wrist that's the state the watch
-     * spends most of its time in unless the user has done a full
-     * figure-8 wave. DataInvalid (or the emulator's -1 sentinel) means
-     * the OS has no reading at all - then fall back to auto-centre. */
+     * turns. Accept any status that comes with usable heading data
+     * (Calibrated is best, but Calibrating still provides a rough
+     * heading and that's where the watch spends most of its life
+     * unless the user does a full figure-8 wave). DataInvalid (or the
+     * emulator's -1 sentinel) -> auto-centre. */
     if (sample.status == CompassStatusCalibrated ||
         sample.status == CompassStatusCalibrating) {
         ui_arc_set_heading(sample.heading_deg);
     } else {
         ui_arc_set_heading(-1.0f);
     }
+
+    /* Refresh the on-screen status diagnostic so the user can see
+     * what status / heading the OS is actually reporting. */
+    int64_t now = now_unix_utc();
+    geo_fix_t fix = geo_current();
+    format_status_buf(now, &fix);
+    layer_mark_dirty(text_layer_get_layer(s_gps_layer));
+
     redraw_compass_view();
 }
 
