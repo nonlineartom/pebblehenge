@@ -353,10 +353,14 @@ static void on_compass_sample(pbh_compass_t sample) {
     /* Feed the sky-arc renderer so the main view rotates as the user
      * turns. When the compass isn't calibrated yet, fall back to
      * north-up (heading = -1) so the user still sees the day's path. */
-    /* Only a fully calibrated reading is trustworthy; anything else
-     * (DataInvalid, Calibrating, or the emulator's -1 "unavailable")
-     * leaves the view auto-centred on solar noon. */
-    if (sample.status == CompassStatusCalibrated) {
+    /* Use any heading we're given - Calibrated is best, but Calibrating
+     * still provides a usable rough heading (just with reduced
+     * confidence), and on the wrist that's the state the watch
+     * spends most of its time in unless the user has done a full
+     * figure-8 wave. DataInvalid (or the emulator's -1 sentinel) means
+     * the OS has no reading at all - then fall back to auto-centre. */
+    if (sample.status == CompassStatusCalibrated ||
+        sample.status == CompassStatusCalibrating) {
         ui_arc_set_heading(sample.heading_deg);
     } else {
         ui_arc_set_heading(-1.0f);
